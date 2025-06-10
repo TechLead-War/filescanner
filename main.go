@@ -1,31 +1,93 @@
 package main
 
 import (
-	"bufio"
+	"filescanner/pkg/counter"
+	"filescanner/pkg/pool"
+	"filescanner/pkg/scanner"
+	"flag"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
+	"runtime"
+	"strings"
 )
 
+var cmds = map[string]*flag.FlagSet{} // Global so printUsage() can access
+
 func main() {
-	root := "."
-	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && filepath.Ext(path) == ".txt" {
-			count := countLines(path)
-			fmt.Printf("%s: %d\n", path, count)
-		}
-		return nil
-	})
+	// Define "scan" subcommand and flags
+	scanCmd := flag.NewFlagSet("scan", flag.ExitOnError)
+	dir := scanCmd.String("dir", ".", "directory to scan")
+	ext := scanCmd.String("ext", ".txt", "file extension")
+	workers := scanCmd.Int("workers", 0, "number of goroutines (0=NumCPU)")
+	cmds["scan"] = scanCmd
+
+	// Determine command
+	args := os.Args[1:]
+	var cmdName string
+	var cmdArgs []string
+
+	switch {
+	case len(args) == 0:
+		cmdName, cmdArgs = "scan", []string{}
+	case isHelp(args[0]):
+		printUsage()
+		os.Exit(0)
+	case cmds[args[0]] != nil:
+		cmdName, cmdArgs = args[0], args[1:]
+	case strings.HasPrefix(args[0], "-"):
+		cmdName, cmdArgs = "scan", args
+	default:
+		fmt.Printf("Unknown command: %s\n\n", args[0])
+		printUsage()
+		os.Exit(1)
+	}
+
+	// Parse command-specific flags
+	fs := cmds[cmdName]
+	fs.Parse(cmdArgs)
+
+	// Run "scan" command
+	if cmdName == "scan" {
+		runScan(*dir, *ext, *workers)
+	}
 }
 
-func countLines(path string) int {
-	f, _ := os.Open(path)
-	defer f.Close()
-	s := bufio.NewScanner(f)
-	n := 0
-	for s.Scan() {
-		n++
+func runScan(dir, ext string, workers int) {
+	if workers <= 0 {
+		workers = runtime.NumCPU()
 	}
-	return n
+	paths := scanner.Walk(dir, ext)
+	results := pool.Start(paths, workers, counter.CountLines)
+
+	totalFiles, totalLines := 0, 0
+	for r := range results {
+		if r.Err != nil {
+			fmt.Fprintf(os.Stderr, "error %s: %v\n", r.Path, r.Err)
+			continue
+		}
+		fmt.Printf("%s: %d\n", r.Path, r.Lines)
+		totalFiles++
+		totalLines += r.Lines
+	}
+	fmt.Printf("\nScanned %d files, %d total lines\n", totalFiles, totalLines)
+}
+
+func isHelp(s string) bool {
+	return s == "-h" || s == "--help" || s == "help"
+}
+
+func printUsage() {
+	fmt.Println("Commands:")
+	for name := range cmds {
+		fmt.Printf("  %s\n", name)
+	}
+	fmt.Println("\nUse '<command> --help' to see its options.\n")
+
+	for name, fs := range cmds {
+		fmt.Printf("Options for '%s':\n", name)
+		fs.VisitAll(func(f *flag.Flag) {
+			fmt.Printf("  -%s\t%s (default %q)\n", f.Name, f.Usage, f.DefValue)
+		})
+		fmt.Println()
+	}
 }
