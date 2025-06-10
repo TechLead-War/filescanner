@@ -6,6 +6,7 @@ type Result struct {
 	Path  string
 	Lines int
 	Err   error
+	Words map[string]int
 }
 
 // Start spins up workers to apply countFn to each path.
